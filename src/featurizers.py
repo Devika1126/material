@@ -9,18 +9,28 @@ def get_atom_features(site) -> np.ndarray:
     Returns atomic features: atomic number, electronegativity, atomic radius.
     """
     el = Element(site.specie.symbol)
-    return np.array([
-        el.Z,
-        el.X if el.X else 0.0,
-        el.atomic_radius if el.atomic_radius else 0.0
-    ], dtype=np.float32)
+    # Scale features to reasonable ranges to help model stability
+    # atomic number up to ~100 -> scale to ~0-1
+    z = float(el.Z) / 100.0
+    # electronegativity (Pauling) roughly 0-4 -> scale to 0-1
+    en = float(el.X) / 4.0 if el.X is not None else 0.0
+    # atomic radius in angstroms -> scale by 5.0 as a conservative upper bound
+    ar = float(el.atomic_radius) / 5.0 if el.atomic_radius is not None else 0.0
+    arr = np.array([z, en, ar], dtype=np.float32)
+    # defensive sanitization
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1e3, neginf=-1e3)
+    return arr
 
 def rbf_expand(dist, D_min=0, D_max=8, N=32, gamma=4):
     """
     Radial basis expansion for edge distances.
     """
     centers = np.linspace(D_min, D_max, N)
-    return np.exp(-gamma * (dist - centers) ** 2)
+    out = np.exp(-gamma * (dist - centers) ** 2)
+    # ensure dtype float32 and sanitize
+    out = np.array(out, dtype=np.float32)
+    out = np.nan_to_num(out, nan=0.0, posinf=1e3, neginf=-1e3)
+    return out
 
 def structure_to_graph(structure: Structure, cutoff: float = 5.0) -> Data:
     """
@@ -44,7 +54,20 @@ def structure_to_graph(structure: Structure, cutoff: float = 5.0) -> Data:
         edge_attr = torch.zeros((0, 32), dtype=torch.float32)
     else:
         edge_index = torch.tensor(np.array(edge_index).T, dtype=torch.long)
-        edge_attr = torch.tensor(np.array(edge_attr), dtype=torch.float32)
+        # Ensure edge_attr is a well-shaped float32 array
+        edge_attr = np.array(edge_attr, dtype=np.float32)
+        if edge_attr.ndim == 1:
+            edge_attr = edge_attr.reshape(-1, 1)
+        # If RBF produced unexpected size, pad or trim to 32
+        if edge_attr.shape[1] != 32:
+            desired = 32
+            current = edge_attr.shape[1]
+            if current < desired:
+                pad = np.zeros((edge_attr.shape[0], desired - current), dtype=np.float32)
+                edge_attr = np.concatenate([edge_attr, pad], axis=1)
+            else:
+                edge_attr = edge_attr[:, :desired]
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float32)
     data = Data(
         x = torch.tensor(atom_features, dtype=torch.float32),
         edge_index = edge_index,

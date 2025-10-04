@@ -1,7 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 from torch_geometric.nn import CGConv, global_mean_pool
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # basic config for standalone runs
+    logging.basicConfig(level=logging.INFO)
 
 class CGCNN(nn.Module):
     """
@@ -15,6 +21,8 @@ class CGCNN(nn.Module):
             CGConv(hidden_dim, edge_dim, aggr='add') for _ in range(num_layers - 1)
         ])
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        # normalization for stability
+        self.norm = nn.LayerNorm(hidden_dim)
         # Multi-task output heads
         self.heads = nn.ModuleDict({
             "volume": nn.Linear(hidden_dim, 1),
@@ -27,39 +35,38 @@ class CGCNN(nn.Module):
     def forward(self, data):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         x = self.conv1(x, edge_index, edge_attr)
-        # Log the range of values after conv1
-        print(f"Range after conv1: min={x.min().item()}, max={x.max().item()}")
+        # defensive NaN handling
         if not torch.isfinite(x).all():
-            print("WARNING: NaN or Inf detected after conv1")
+            logger.warning("NaN or Inf detected after conv1; applying nan_to_num")
+            x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
 
-        x = F.relu(self.node_proj(x))
-        # Log the range of values after node_proj
-        print(f"Range after node_proj: min={x.min().item()}, max={x.max().item()}")
-        if not torch.isfinite(x).all():
-            print("WARNING: NaN or Inf detected after node_proj")
+        x = self.node_proj(x)
+        x = self.norm(x)
+        x = F.relu(x)
 
         for conv in self.convs:
             x = conv(x, edge_index, edge_attr)
-            # Log the range of values after each convolution layer
-            print(f"Range after convolution layer: min={x.min().item()}, max={x.max().item()}")
             if not torch.isfinite(x).all():
-                print("WARNING: NaN or Inf detected after a convolution layer")
+                logger.warning("NaN or Inf detected after a convolution layer; applying nan_to_num")
+                x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
+            # clamp to avoid extremely large activations
+            x = torch.clamp(x, min=-1e6, max=1e6)
             x = F.relu(x)
 
         x = global_mean_pool(x, batch)
-        # Log the range of values after global_mean_pool
-        print(f"Range after global_mean_pool: min={x.min().item()}, max={x.max().item()}")
         if not torch.isfinite(x).all():
-            print("WARNING: NaN or Inf detected after global_mean_pool")
+            logger.warning("NaN or Inf detected after global_mean_pool; applying nan_to_num")
+            x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
 
-        x = F.relu(self.fc1(x))
-        # Log the range of values after fc1
-        print(f"Range after fc1: min={x.min().item()}, max={x.max().item()}")
-        if not torch.isfinite(x).all():
-            print("WARNING: NaN or Inf detected after fc1")
+        x = self.fc1(x)
+        x = self.norm(x)
+        x = F.relu(x)
+        # final clamp
+        x = torch.clamp(x, min=-1e6, max=1e6)
         # Multi-task outputs
         out = {k: self.heads[k](x) for k in self.heads}
         for k, v in out.items():
             if not torch.isfinite(v).all():
-                print(f"WARNING: NaN or Inf detected in output head {k}")
+                logger.warning(f"NaN or Inf detected in output head {k}; applying nan_to_num")
+                out[k] = torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=-1e6)
         return out
