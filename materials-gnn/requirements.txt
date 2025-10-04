@@ -1,0 +1,18 @@
+# requirements.txt for materials-gnn
+# Core
+torch
+torch-geometric
+numpy
+scikit-learn
+matplotlib
+pandas
+fastapi
+uvicorn
+pytest
+# Model zoo (add as needed)
+megnet
+schnetpack
+dimenet
+alignn
+# Explainability
+captum

@@ -1,0 +1,9 @@
+torch>=2.0
+torch-geometric>=2.3
+pymatgen>=2023.5
+ase>=3.22
+scikit-learn>=1.2
+fastapi>=0.95
+uvicorn>=0.22
+numpy>=1.23
+pytest>=7.2
